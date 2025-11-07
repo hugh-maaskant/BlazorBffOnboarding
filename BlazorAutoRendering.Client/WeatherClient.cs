@@ -4,6 +4,8 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 
+namespace BlazorAutoRendering.Client;
+
 /// <summary>
 /// this is an example of a class that would access the data via a web service. This is typically
 /// what you'd do in webassembly. 
@@ -13,8 +15,8 @@ using System.Text.Json;
 /// <param name="client"></param>
 internal class WeatherClient(HttpClient client) : IWeatherClient
 {
-    public async Task<WeatherForecast[]> GetWeatherForecasts() => await client.GetFromJsonAsync<WeatherForecast[]>("WeatherForecast")
-                                                                  ?? throw new JsonException("Failed to deserialize");
+    public async Task<WeatherForecast[]> GetWeatherForecasts() =>
+        await client.GetFromJsonAsync<WeatherForecast[]>("WeatherForecast") ?? throw new JsonException("Failed to deserialize");
 }
 
 /// <summary>

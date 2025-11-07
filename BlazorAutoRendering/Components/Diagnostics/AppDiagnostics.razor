@@ -1,0 +1,41 @@
+@page "/diag/app"
+@using Microsoft.AspNetCore.Authorization
+@attribute [Authorize]
+@inject IHttpContextAccessor HttpContextAccessor
+@inject IConfiguration Configuration
+
+<PageTitle>App Diagnostics</PageTitle>
+
+@if (_diagnosticsEnabled)
+{
+    @if (_diagnostics is not null)
+    {
+        @_diagnostics
+    }
+    else
+    {
+        <p>Loading...</p>
+    }
+}
+else
+{
+    <p>The diagnostic pages are not enabled. To view this page, please set <code>EnableAuthDiagnostics</code> to <code>true</code> in <code>appsettings.Development.json</code>.</p>
+}
+
+@code {
+    private RenderFragment? _diagnostics;
+    private bool _diagnosticsEnabled;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _diagnosticsEnabled = Configuration.GetValue<bool>("EnableAuthDiagnostics");
+        if (_diagnosticsEnabled)
+        {
+            var httpContext = HttpContextAccessor.HttpContext;
+            if (httpContext is not null)
+            {
+                _diagnostics = await PrincipalInfoRenderer.GetAuthenticationInfoAsRenderFragmentAsync(httpContext, "cookie");
+            }
+        }
+    }
+}

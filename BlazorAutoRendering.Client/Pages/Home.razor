@@ -1,10 +1,20 @@
 ﻿@page "/"
+@using Microsoft.AspNetCore.WebUtilities
 
-@rendermode InteractiveServer
+@rendermode InteractiveAuto
+
+@inject NavigationManager NavigationManager
 
 <PageTitle>Home</PageTitle>
 
 <h1>Hello, Blazor BFF!</h1>
+
+@if (_onboardingErrorMessage is not null)
+{
+    <div class="alert alert-danger" role="alert">
+        <strong>Onboarding Failed:</strong> @_onboardingErrorMessage
+    </div>
+}
 
 <AuthorizeView>
     <Authorized>
@@ -18,3 +28,18 @@
     </NotAuthorized>
 </AuthorizeView>
 
+@code {
+    private string? _onboardingErrorMessage;
+
+    protected override void OnInitialized()
+    {
+        var uri = NavigationManager.ToAbsoluteUri(NavigationManager.Uri);
+        if (QueryHelpers.ParseQuery(uri.Query).TryGetValue("onboardingError", out var error))
+        {
+            if (error == "true" && QueryHelpers.ParseQuery(uri.Query).TryGetValue("message", out var message))
+            {
+                _onboardingErrorMessage = message;
+            }
+        }
+    }
+}
