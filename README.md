@@ -47,6 +47,9 @@ According to their website:
   The `OnboardingInputModel` has validation attributes (`[Required]`, `[MinLength]`, etc.),
   which are enforced on the server.
   If validation fails, the user is logged out and redirected to the homepage with an error message.
+
+  Note: the Duende Demo Server does not redirect back to the App's logout URL and stays on its logout page.
+
 - This has only been tested with .NET 9.0 and version 3.0 of Duende's BFF.
 - To test with the Azure AD B2C provider, you will need to configure your own Client on Azure and fill in its
   properties in the `"B2C"` section of `appsettings.json`, e.g.
@@ -231,3 +234,9 @@ To aid in debugging and integration, this sample includes diagnostic pages. To e
     At the bottom of the page is a URL that allows you to continue to the  onboarding form.
 -   **/diag/app:** After logging in, navigate to this page to see all claims, properties, and tokens associated with
     your final application session (`cookie`).
+
+## License and Attribution
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+This project is an extension of a demo project from Duende Software, which is also licensed under the MIT License. The original software can be found at https://github.com/DuendeSoftware/Samples/tree/main/BFF/v3/BlazorAutoRendering.

@@ -1,0 +1,52 @@
+@page "/onboarding"
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Authorization
+
+@attribute [Authorize(Policy = "cookie-idp")]
+
+<PageTitle>Onboarding</PageTitle>
+
+<h1>Onboarding</h1>
+
+<p>Welcome! Please choose a display name to complete your registration.</p>
+<p>The display name must be between
+    @($"{OnboardingInputModel.MinDisplayNameLength}") and
+    @($"{OnboardingInputModel.MaxDisplayNameLength}") characters long.
+</p>
+
+<!--
+NOTE: For the demo this <EditForm> is rendered on a static, SSR page, meaning NO client side validation will occur
+      and the OnValidSubmit="SubmitForm" will not function either.
+
+      So far, I have been unsuccessful in making this work in the combination Blazor page with form and a Minimal
+      Endpoint API in the program file (where I wanted to keep all OIDC / Login flow code together for the demo).
+-->
+<EditForm Model="@Input" OnValidSubmit="SubmitForm" FormName="OnboardingForm">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div class="mb-3">
+        <label for="displayName" class="form-label">Display Name:</label>
+        <InputText id="displayName" @bind-Value="Input.DisplayName" class="form-control" name="DisplayName" />
+    </div>
+
+    <button type="submit" class="btn btn-primary">Complete Registration</button>
+</EditForm>
+
+@code {
+
+    [SupplyParameterFromForm]
+    private OnboardingInputModel Input { get; set; } = new();
+
+
+    // NOTE: will not be called in the static SSR mode ...
+    private /* async */ Task SubmitForm()
+    {
+        // This method is called on a valid form submission.
+        // The actual processing is handled by the POST endpoint in Program.cs,
+        // which this form will post to.
+        Debug.WriteLine($"Form submitted with DisplayName: {Input.DisplayName}");
+
+        return  Task.CompletedTask;
+    }
+}

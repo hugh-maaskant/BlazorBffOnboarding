@@ -1,0 +1,61 @@
+@page "/admin/users"
+@rendermode InteractiveServer
+@using BlazorBffOnboarding.AppUser
+@using Microsoft.AspNetCore.Authorization
+
+@inject IAppUserService UserService
+@inject NavigationManager NavigationManager
+
+@attribute [Authorize(Policy = "Admin")]
+
+
+<PageTitle>User Administration</PageTitle>
+
+<h1>User Administration</h1>
+
+@if (_users is null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Display Name</th>
+                <th>Identity Provider</th>
+                <th>IDP Subject</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var user in _users)
+            {
+                <tr>
+                    <td>@user.DisplayName</td>
+                    <td>@user.IdpName</td>
+                    <td>@user.IdpSubject</td>
+                    <td>
+                        <button class="btn btn-danger btn-sm" @onclick="() => DeleteUser(user.Id)">Delete</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<AppUser>? _users;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _users = await UserService.GetAllUsersAsync();
+    }
+
+    private async Task DeleteUser(Guid userId)
+    {
+        await UserService.DeleteUserAsync(userId);
+        // Reload the page to see the updated list
+        NavigationManager.NavigateTo("/admin/users", forceLoad: true);
+    }
+}
