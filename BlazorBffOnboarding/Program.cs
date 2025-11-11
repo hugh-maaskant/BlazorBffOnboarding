@@ -3,6 +3,7 @@
 
 using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
+using System.Threading.RateLimiting;
 using BlazorBffOnboarding;
 using BlazorBffOnboarding.AppUser;
 using BlazorBffOnboarding.Client;
@@ -18,18 +19,26 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Remove the Server header from all responses
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.AddServerHeader = false;
+});
+
 // Add services to the container.
-builder.Services.AddRazorComponents()
+builder.Services
+    .AddRazorComponents()
     .AddInteractiveServerComponents()
     .AddInteractiveWebAssemblyComponents();
 
 // BFF setup for Blazor
-builder.Services.AddBff()
+builder.Services
+    .AddBff()
     .AddServerSideSessions() // Add in-memory implementation of server side sessions
     .AddBlazorServer()
-    .AddRemoteApis()
-    ;
+    .AddRemoteApis();
 
+// Register an HTTP client for the external greeting API that uses the user's access token
 builder.Services.AddUserAccessTokenHttpClient("greet",
     configureClient: client => client.BaseAddress = new Uri("https://localhost:7001/"));
 
@@ -70,6 +79,9 @@ builder.Services.AddAuthentication(options =>
         // the temporary cookie for the IDP to sign in the user with the IDP's identity and properties
         options.Cookie.Name = "__Host-blazor-idp";
         options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        options.Cookie.HttpOnly = true;
+        options.Cookie.IsEssential = true;
         options.ExpireTimeSpan = TimeSpan.FromMinutes(15);
     })
     .AddOpenIdConnect("oidc", options =>
@@ -100,7 +112,7 @@ builder.Services.AddAuthentication(options =>
                 throw new InvalidOperationException("Cannot retrieve ClaimsIdentity from Principal");
             }
 
-            // Duende BFF needs a Session Id (sid) claim, if the IDP doesn't have one, polyfill our own
+            // Duende BFF needs a Session ID (sid) claim, if the IDP doesn't have one, polyfill our own
             if (claimsIdentity.FindFirst("sid") == null)
             {
                 claimsIdentity.AddClaim(new Claim("sid", Guid.CreateVersion7().ToString()));
@@ -188,6 +200,19 @@ builder.Services.AddAuthorization(options =>
     });
 });
 
+// Configure Rate Limiting for the onboarding endpoint
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("onboarding", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString(),
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(15)
+            }));
+});
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -228,10 +253,17 @@ app.MapPost("/onboarding", async (HttpContext context, [FromForm] OnboardingInpu
 {
     // Ensure we are authenticated with the IDP
     var result = await context.AuthenticateAsync("cookie-idp");
-
     if (!result.Succeeded || result.Principal is null || result.Properties is null)
         return Results.Challenge();
-
+    
+    // Request validation
+    if (!context.Request.HasFormContentType)
+        return Results.BadRequest("Invalid content type");
+    
+    var contentLength = context.Request.ContentLength ?? 0;
+    if (contentLength > 1024) // 1KB limit
+        return Results.BadRequest("Request too large");
+    
     // Server-side validation of the incoming model
     var validationResults = new List<ValidationResult>();
     var validationContext = new ValidationContext(model);
@@ -284,7 +316,17 @@ app.MapPost("/onboarding", async (HttpContext context, [FromForm] OnboardingInpu
     await PerformSignInAsync(context, appPrincipal, appProperties);
         
     return Results.LocalRedirect(finalReturnUrl ?? "/");
-}).RequireAuthorization("cookie-idp");
+}).RequireAuthorization("cookie-idp")
+  .RequireRateLimiting("onboarding");
+
+// Additional Security Headers  
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.TryAdd("X-Frame-Options", "DENY");
+    context.Response.Headers.TryAdd("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.TryAdd("Referrer-Policy", "strict-origin-when-cross-origin");
+    await next();
+});
 
 app.Run();
 

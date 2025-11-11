@@ -21,15 +21,16 @@ According to their website:
 
 ## Key New Features
 
-- **Identity Replacement:** Replaces the IDP's `sub` claim with a stable, internal application-specific user ID,
-  while preserving the original IDP `sub` claim as `idp-sub`.
-- **New User Onboarding Flow:** Interrupts the standard BFF sign-in process to direct new users to a Blazor page
+- **Identity Replacement:** Replaces the IDP's `sub` claim value with a stable, application-specific, user ID,
+  preserving the original IDP `sub` claim as `idp-sub`.
+- **New User Onboarding Flow:** Interrupts the standard ASP.NET Core c.q. the BFF sign-in process,
+  directing new users to a Blazor Onboarding page.
   with an `EditForm` that securely POSTs data to the server.
 - **Persistent User Store:** Implements a SQLite database to persist application user information.
 - **User Administration:** Includes an Admin page for viewing and deleting user records in the database.
 - **Configuration-Driven Multi-Provider Support:** Easily switch between different OIDC providers via `appsettings.json`.
   Note: Duende Demo IdentityServer has been preconfigured, Azure AD B2C has been prepared with placeholder values, see below.
-- **Provider-Agnostic `sid` Polyfill:** Automatically generates a `sid` (Session ID) claim if the external IDP does
+- **Provider-Agnostic `sid` Polyfill:** Automatically generate a `sid` (Session ID) claim if the external IDP does
   not provide one, ensuring compatibility with Duende BFF's server-side session management.
 - **Clean, Standards-Compliant Logout:** Implements a two-step OIDC logout flow that handles the `state` parameter,
   ensuring it leaves a clean URL in the browser.
@@ -38,17 +39,18 @@ According to their website:
 
 ## Limitations
 
-- Like the original Duende sample, no additional additional security checks like Content Security
-  Policies (CSPs) or rate-limiting requests are implemented beyond the authentication of the login flows.
+- Beyond the authentication of the login flows, only limited additional security measures are implemented (see below).
 - All OIDC flow logic is deliberately inlined in the Host program file for ease of viewing.
   In a production setting this would likely be factored out to separate classes.
-- Server-Side Validation Only on Onboarding Form. The `OnboardingForm.razor` page uses a standard HTML form POST.
-  While this is simple and robust for the authentication flow, it does not perform client-side validation with retry logic.
+- Server-Side Validation Only on the Onboarding Form. The `OnboardingForm.razor` page uses a standard HTML form POST.
+  While this is simple and robust for the authentication flow, it does not perform client-side validation with 
+  retry logic.
   The `OnboardingInputModel` has validation attributes (`[Required]`, `[MinLength]`, etc.),
   which are enforced on the server.
-  If validation fails, the user is logged out and redirected to the homepage with an error message.
+  If validation fails, the user is logged out from both the IDP and the local session, and then redirected to
+  the homepage with an error message.
 
-  Note: the Duende Demo Server does not redirect back to the App's logout URL and stays on its logout page.
+  _Note_: the Duende Demo Server does not redirect back to the App's logout URL and stays on its logout page.
 
 - This has only been tested with .NET 9.0 and version 3.0 of Duende's BFF.
 - To test with the Azure AD B2C provider, you will need to configure your own Client on Azure and fill in its
@@ -66,13 +68,14 @@ According to their website:
 
 - Although I tried to learn the basics of OIDC and web security, I am not a security expert. 
   Review by an expert is recommended before using this in production.
-- I am a "solo-developer" and used an AI assistant (Gemini 2.5) for technical support; the code has not been reviewed by
-  a human professional developer.
+- I am a "solo-developer" and used an AI assistant (Gemini 2.5) for technical support; the code has not been
+  reviewed by a human professional developer.
 - All in all this is just demo software, use appropriately.
 
 ## The Challenge: New User Onboarding with BFF
 
-The standard Duende BFF flow is designed to be seamless: the user logs in at the IDP and is immediately signed into the application.
+The standard Duende BFF flow is designed to be seamless: the user logs in at the IDP and is immediately signed
+into the application.
 However, real-world applications often need to intercept this process for new users to perform tasks such as:
 
 - Creating a user record in the application database.
@@ -87,19 +90,19 @@ The core of this solution is a two-stage sign-in process orchestrated by two dif
 a series of OIDC event handlers, and a dedicated "/onboarding" endpoint with a Blazor "Onboarding" page and form .
 
 1. **Initial Sign-In (`cookie-idp`):** The OIDC handler is configured with `SignInScheme = "cookie-idp"`. 
-   After a user authenticates at the external IDP, they are signed into a temporary, short-lived cookie scheme.
-   This cookie holds the original claims and tokens from the IDP.
+   After a user authenticates at the external IDP, they are signed into this temporary, short-lived cookie scheme.
+   The `cookie-idp` cookie holds the original claims and tokens from the IDP.
 
 2. **The `OnTicketReceived` Decision Point:** This event fires after the `cookie-idp` is created.
    Here, we perform a lookup in our application's user database.
 
-    - **If the user exists (Returning User):** We immediately transform their claims and complete the sign-in to the
-      main application cookie (`cookie`), cleaning up the temporary `cookie-idp` and redirecting them to their
-      original destination.
+    - **If the user exists (Returning User):** We immediately transform their claims and complete the 
+      sign-in to the main application cookie (`cookie`), clean up the temporary `cookie-idp`, and 
+      redirect to the original destination.
 
    - **If the user is new:** We store the original intended `ReturnUrl` in the authentication properties.
-     Based on a feature flag (`EnableAuthDiagnostics`), we then redirect the user to either the `/diag/idp` page
-     (for debugging) or the `/onboarding` page (for the real user flow).
+     Based on a feature flag (`EnableAuthDiagnostics`), we then either redirect the user to the `/diag/idp`
+     page (for debugging) or the `/onboarding` page (for the real user flow).
     
 3.  **The `/onboarding` Endpoint:**
     - `GET /onboarding`: Renders a Blazor page (`OnboardingForm.razor`) containing an `<EditForm>` for the
@@ -110,7 +113,7 @@ a series of OIDC event handlers, and a dedicated "/onboarding" endpoint with a B
       transforms the claims, and completes the sign-in to the main `cookie`.
       Finally, it retrieves the original `ReturnUrl` and redirects the user to their intended destination.
 
-## Critical Implementation Details & "Gotchas"
+## Implementation Details
 
 This project solves several issues that can arise when integrating OIDC providers with the Duende BFF.
 
@@ -126,7 +129,8 @@ This project solves several issues that can arise when integrating OIDC provider
   ```
 ### 2. The `sid` (Session ID) Claim Polyfill
 
-- **Problem:** Duende BFF's server-side session management requires a `sid` claim. Some IDPs, like Azure AD B2C, do not issue one by default, causing logout to fail.
+- **Problem:** Duende BFF's server-side session management requires a `sid` claim. Some IDPs, like Azure AD B2C,
+  do not issue one by default, causing logout to fail.
 - **Solution:** We use the `OnTokenValidated` OIDC event, which fires very early in the pipeline.
   We check if a `sid` claim exists.
   If not, we generate our own using `Guid.CreateVersion7()` and add it to the principal.
@@ -142,6 +146,54 @@ This project solves several issues that can arise when integrating OIDC provider
   We also set `options.SignedOutRedirectUri = "/";`.
   This ensures the OIDC handler intercepts the callback, consumes the `state` parameter,
   and then performs a clean, final redirect to `"/"`.
+
+## Security Measures
+
+The application implements several security measures, particularly around the authentication and onboarding process.
+Some come by default in ASP.NET, some in the Duende BFF, and some are added in this solution.
+
+### Cookie Security
+- Authentication cookies use the `__Host-` prefix.
+- The main application cookie (`__Host-blazor-app`) and temporary IDP cookie (`__Host-blazor-idp`) are configured with:
+  - `SameSite = Lax`
+  - `SecurePolicy = Always`
+  - `HttpOnly = true`
+  - `IsEssential = true` (for GDPR compliance)
+- The temporary IDP cookie has a 15-minute expiration
+
+### Request Protection
+- The Server header is removed from all responses
+- On the onboarding endpoint specifically:
+  - Rate limiting (max 5 requests per 15 minutes per IP address)
+  - Request size validation (1KB limit)
+  - Content-type validation
+  - CSRF protection through antiforgery tokens
+  - Secure redirect validation (only local URLs allowed)
+
+### Input Validation
+- Server-side validation of the onboarding form.
+- Display name requirements:
+  - Minimum length: 5 characters.
+  - Maximum length: 50 characters.
+  - Required field validation.
+  - Only alphanumeric and limited punctuation characters are allowed.
+
+### Security Headers
+- `X-Frame-Options: DENY`
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+
+### Authentication Flow Security
+- Protection of diagnostic endpoints through authorization policies.
+- Clean post-logout URLs (removal of state parameters).
+
+For production deployments, consider:
+
+- Implementing additional monitoring and logging.
+- Adding Content Security Policy (CSP) headers.
+- Adding IP-based blocking for suspicious activity.
+- Implementing a more sophisticated rate-limiting strategy.
+- Adding CAPTCHA or similar mechanisms if bot abuse becomes a concern.
 
 ## How to Run This Sample
 
@@ -167,29 +219,32 @@ This project solves several issues that can arise when integrating OIDC provider
    Authority is typically something in the form of `"https://XXX.b2clogin.com/XXX.onmicrosoft.com/B2C_1_SignupAndSignin/v2.0"`, where XXX is your tenant name.
     
    Note the `ClientSecret` should be set using the .NET User Secrets manager:
-   - From the `BlazorAutoRendering` project directory, run the following command, replacing `Your_Secret_Value_Here` with your actual client secret from the Azure portal:
+   - From the `BlazorBffOnboarding` project directory, run the following command, replacing `Your_Secret_Value_Here` with your actual client secret from the Azure portal:
      ```sh
-     dotnet user-secrets set "Authentication:B2C:ClientSecret" "Your_Secret_Value_Here"
+     > dotnet user-secrets init
+     > dotnet user-secrets set "Authentication:B2C:ClientSecret" "Your_Secret_Value_Here"
      ```
    - The hierarchical key `Authentication:B2C:ClientSecret` is essential for the configuration binder to correctly associate the secret with the B2C provider settings.
 
-3. **Configure the User Database:** This project uses a SQLite database to store user information. The connection string is located in `appsettings.json`:
+3. **Configure the User Database:** This project uses a SQLite database to store user information.
+   The connection string is located in `appsettings.json`:
    ```json
    "ConnectionStrings": {
      "UserStore": "Data Source=users.db"
    }
    ```
-   The database is managed using Entity Framework Core migrations. To create and apply the initial migration, run the following commands from the `BlazorAutoRendering` project directory:
+   The database is managed using Entity Framework Core migrations.
+   To create and apply the initial migration, run the following commands from the `BlazorBffOnboarding` project directory:
    ```sh
-   dotnet ef migrations add InitialCreate
-   dotnet ef database update
+   > dotnet ef migrations add InitialCreate
+   > dotnet ef database update
    ```
 
 4. **Add your own Provider** (optional)**:** Add another section with a descriptive key and the required details for your Id Provider.
 
 ### Running from the Command Line
 
-This solution contains two startup projects that must be running simultaneously: the Blazor BFF host (`BlazorAutoRendering`) and the backend API (`BlazorAutoRendering.Api`).
+This solution contains two startup projects that must be running simultaneously: the Blazor BFF host (`BlazorBffOnboarding) and the backend API (`BlazorBffOnboarding.Api`).
 
 To run the solution from the command line, you will need to open **two separate terminal windows**.
 
@@ -197,10 +252,10 @@ To run the solution from the command line, you will need to open **two separate 
 
 ```sh
 # Navigate to the API project directory
-cd BlazorAutoRendering.Api
+> cd BlazorBffOnboarding.Api
 
 # Run the API project
-dotnet run
+> dotnet run
 ```
 You should see output indicating that the API is listening on `https://localhost:7001`.
 
@@ -208,17 +263,17 @@ You should see output indicating that the API is listening on `https://localhost
 
 ```sh
 # Navigate to the Blazor host project directory
-cd BlazorAutoRendering
+> cd BlazorBffOnboarding
 
 # Run the Blazor host project
-dotnet run
+> dotnet run
 ```
 The application will launch.
 Open a browser tab on `https://localhost:7035`. The Blazor application is now running and can make calls to the BFF (the /weather page) and the backend API (the /greeting page).
 
 ### Running from an IDE
 
-Most modern IDEs (like Visual Studio, JetBrains Rider, or VS Code) can be configured to launch multiple startup projects. Please consult your IDE's documentation for instructions on how to set up a "Compound" or "Multiple Startup Projects" launch configuration that runs both the `BlazorAutoRendering` and `BlazorAutoRendering.Api` projects.
+Most modern IDEs (like Visual Studio, JetBrains Rider, or VS Code) can be configured to launch multiple startup projects. Please consult your IDE's documentation for instructions on how to set up a "Compound" or "Multiple Startup Projects" launch configuration that runs both the `BlazorBffOnboarding` and `BlazorBffOnboarding.Api` projects.
 
 ### Using the Diagnostic Endpoints
 
