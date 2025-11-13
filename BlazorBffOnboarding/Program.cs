@@ -1,9 +1,6 @@
-// Copyright (c) Duende Software. All rights reserved.
+// Copyright (c) 2025 Hugh Maaskant. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
-using System.ComponentModel.DataAnnotations;
-using System.Security.Claims;
-using System.Threading.RateLimiting;
 using BlazorBffOnboarding;
 using BlazorBffOnboarding.AppUser;
 using BlazorBffOnboarding.Client;
@@ -12,10 +9,18 @@ using BlazorBffOnboarding.Persistence;
 using Duende.Bff;
 using Duende.Bff.Blazor;
 using Duende.Bff.Yarp;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.ComponentModel.DataAnnotations;
+using System.Security.Claims;
+using System.Text.Json;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Components.Server;
+using Microsoft.Extensions.Primitives;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -164,8 +169,8 @@ builder.Services.AddAuthentication(options =>
 
                 // Continue the sign-in process (directly or indirectly via "/diag/idp") with the onboarding UI
                 context.ReturnUri = builder.Configuration.GetValue<bool>("EnableAuthDiagnostics")
-                    ? "/diag/idp"       // Shows Auth info and contains a link to "/onboarding" to proceed
-                    : "/onboarding";    // The onboarding Blazor page with a sample form
+                    ? "/diag/idp"                 // Shows Auth info and contains a link to "/onboarding" to proceed
+                    : "/onboarding/interactive";  // The onboarding Blazor page with a sample form
             }
         };
 
@@ -200,17 +205,34 @@ builder.Services.AddAuthorization(options =>
     });
 });
 
-// Configure Rate Limiting for the onboarding endpoint
+// Configure Rate Limiting for the onboarding endpoint and the antiforgery token endpoint
 builder.Services.AddRateLimiter(options =>
 {
     options.AddPolicy("onboarding", httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString(),
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon",
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 5,
                 Window = TimeSpan.FromMinutes(15)
             }));
+
+    // Lightweight rate-limit for antiforgery token requests.
+    // Only the authenticated temporary IDP session should call this, but add rate limiting as defense-in-depth.
+    options.AddPolicy("antiforgery", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,               // e.g. 10 requests
+                Window = TimeSpan.FromMinutes(5)
+            }));
+});
+
+builder.Services.Configure<CircuitOptions>(options =>
+{
+    // Development-time only: show detailed exceptions on circuits
+    options.DetailedErrors = true;
 });
 
 var app = builder.Build();
@@ -319,7 +341,117 @@ app.MapPost("/onboarding", async (HttpContext context, [FromForm] OnboardingInpu
 }).RequireAuthorization("cookie-idp")
   .RequireRateLimiting("onboarding");
 
-// Additional Security Headers  
+// Async antiforgery token endpoint (require cookie-idp and rate limiting)
+app.MapGet("/antiforgery/token", async (HttpContext ctx, IAntiforgery antiforgery) =>
+{
+    // Require the temporary IDP cookie session
+    var authResult = await ctx.AuthenticateAsync("cookie-idp");
+    if (!authResult.Succeeded) return Results.Unauthorized();
+
+    var tokens = antiforgery.GetAndStoreTokens(ctx);
+    return Results.Json(new { token = tokens.RequestToken });
+})
+.RequireAuthorization("cookie-idp")
+.RequireRateLimiting("antiforgery");
+
+// Development-only diagnostic /onboarding/finish handler
+app.MapPost("/onboarding/finish", async (HttpContext context, IAntiforgery antiforgery, ILogger<Program> logger) =>
+{
+    logger.LogInformation("Onboarding/finish START - RemoteIp={RemoteIp}", context.Connection.RemoteIpAddress);
+
+    // Ensure cookie-idp auth (we need auth properties)
+    var auth = await context.AuthenticateAsync("cookie-idp");
+    if (!auth.Succeeded || auth.Principal is null || auth.Properties is null)
+    {
+        logger.LogWarning("Onboarding/finish: not authenticated (cookie-idp)");
+        return Results.Json(new { success = false, message = "Not authenticated" }, statusCode: 401);
+    }
+
+    // Validate antiforgery token
+    try
+    {
+        await antiforgery.ValidateRequestAsync(context);
+    }
+    catch (AntiforgeryValidationException ex)
+    {
+        logger.LogWarning(ex, "Onboarding/finish: antiforgery validation failed");
+        return Results.Json(new { success = false, message = "Invalid antiforgery token" }, statusCode: 400);
+    }
+
+    // Ensure JSON content
+    var contentType = context.Request.ContentType ?? "";
+    if (!contentType.Contains("application/json", StringComparison.OrdinalIgnoreCase))
+    {
+        logger.LogWarning("Onboarding/finish: unexpected Content-Type: {ContentType}", contentType);
+        return Results.Json(new { success = false, message = "Expected application/json" }, statusCode: 400);
+    }
+
+    // Read and validate model
+    OnboardingInputModel? model;
+    try
+    {
+        model = await context.Request.ReadFromJsonAsync<OnboardingInputModel>();
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Onboarding/finish: malformed JSON");
+        return Results.Json(new { success = false, message = "Malformed JSON" }, statusCode: 400);
+    }
+
+    if (model is null)
+        return Results.Json(new { success = false, message = "Missing body" }, statusCode: 400);
+
+    var validationResults = new List<ValidationResult>();
+    var validationContext = new ValidationContext(model);
+    if (!Validator.TryValidateObject(model, validationContext, validationResults, true))
+    {
+        var dict = validationResults
+            .SelectMany(r => (r.MemberNames.Any() ? r.MemberNames : new[] { string.Empty })
+                              .Select(m => new { Field = m, Error = r.ErrorMessage ?? string.Empty }))
+            .GroupBy(x => x.Field)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Error).ToArray());
+
+        logger.LogInformation("Onboarding/finish: validation failed {@Validation}", dict);
+        return Results.Json(new { success = false, validation = dict }, statusCode: 400);
+    }
+
+    // Create user and perform sign-in
+    try
+    {
+        var appUserService = context.RequestServices.GetRequiredService<IAppUserService>();
+        var idpSubject = auth.Principal.FindFirstValue("sub") ?? throw new InvalidOperationException("sub claim not found");
+
+        var newAppUser = await appUserService.CreateAppUserAsync(activeScheme, idpSubject, model.DisplayName!);
+        var newUserId = newAppUser.Id.ToString();
+
+        var (appPrincipal, appProperties) = TransformPrincipal(auth.Principal, auth.Properties, newUserId);
+
+        var identity = (ClaimsIdentity)appPrincipal.Identity!;
+        if (!identity.HasClaim(c => c.Type.Equals("name", StringComparison.InvariantCultureIgnoreCase)))
+        {
+            identity.AddClaim(new Claim("name", model.DisplayName!));
+        }
+        identity.AddClaim(new Claim("display-name", model.DisplayName!));
+
+        appProperties.Items.TryGetValue("ultimateReturnUrl", out var finalReturnUrl);
+        appProperties.Items.Remove("ultimateReturnUrl");
+
+        logger.LogInformation("Onboarding/finish: performing SignIn/SignOut for new user {UserId}", newUserId);
+        await PerformSignInAsync(context, appPrincipal, appProperties);
+        logger.LogInformation("Onboarding/finish: SignIn complete");
+
+        return Results.Json(new { success = true, redirectUrl = finalReturnUrl ?? "/" });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Onboarding/finish: error creating user or signing in");
+        return Results.Json(new { success = false, message = "Server error" }, statusCode: 500);
+    }
+})
+.RequireAuthorization("cookie-idp")
+.RequireRateLimiting("onboarding");
+
+    // Additional Security Headers  
 app.Use(async (context, next) =>
 {
     context.Response.Headers.TryAdd("X-Frame-Options", "DENY");

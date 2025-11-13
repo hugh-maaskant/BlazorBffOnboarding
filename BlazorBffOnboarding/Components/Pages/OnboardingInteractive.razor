@@ -1,0 +1,139 @@
+﻿@page "/onboarding/interactive"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Forms
+@inject IJSRuntime JS
+
+@attribute [Authorize(Policy = "cookie-idp")]
+@rendermode InteractiveServer
+
+<PageTitle>Onboarding (Interactive)</PageTitle>
+
+<h1>Onboarding (Interactive)</h1>
+
+<p>Interactive onboarding uses client-side JSON submit and server-side validation. Server errors are mapped back into the form.</p>
+
+<EditForm EditContext="_editContext" OnSubmit="@(async (EditContext __ec) => await HandleSubmit())" id="onboardingForm">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div class="mb-3">
+        <label for="displayName" class="form-label">Display Name</label>
+        <InputText id="displayName" class="form-control" name="DisplayName"
+                   @bind-Value="Model.DisplayName"
+                   @oninput="OnDisplayNameInput" />
+        <ValidationMessage For="@(() => Model.DisplayName)" />
+    </div>
+
+    <button class="btn btn-primary" type="submit" disabled="@_submitting">
+        @_buttonText
+    </button>
+</EditForm>
+
+@code {
+    private OnboardingInputModel Model { get; set; } = new();
+
+    private EditContext _editContext = default!;
+    private ValidationMessageStore _messageStore = default!;
+    private IJSObjectReference? _module;
+    private DotNetObjectReference<OnboardingInteractive>? _dotNetRef;
+    private bool _submitting;
+    private string _buttonText = "Complete Registration";
+
+    protected override void OnInitialized()
+    {
+        _editContext = new EditContext(Model);
+        _messageStore = new ValidationMessageStore(_editContext);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/onboarding.interop.js");
+            _dotNetRef = DotNetObjectReference.Create(this);
+        }
+    }
+
+    // Update model on every input event (accept ChangeEventArgs explicitly)
+    private void OnDisplayNameInput(ChangeEventArgs e)
+    {
+        Model.DisplayName = e?.Value?.ToString() ?? string.Empty;
+        // Tell EditContext the field value changed so validation uses current value
+        _editContext.NotifyFieldChanged(new FieldIdentifier(Model, nameof(Model.DisplayName)));
+    }
+
+    // Simplified single try/catch/finally
+    private async Task HandleSubmit()
+    {
+        _messageStore.Clear();
+        _editContext.NotifyValidationStateChanged();
+
+        var isValid = _editContext.Validate();
+        if (!isValid) return;
+
+        _submitting = true;
+        _buttonText = "Submitting...";
+        StateHasChanged();
+
+        try
+        {
+            // Call JS module to POST JSON with antiforgery token
+            await _module!.InvokeVoidAsync("submitJson", _dotNetRef, "onboardingForm");
+        }
+        catch (JSException jsex)
+        {
+            // Show JS interop errors in UI instead of letting the circuit die
+            await OnServerError("Client-side error: " + jsex.Message);
+        }
+        catch (Exception ex)
+        {
+            // General guard - surface a friendly message
+            await OnServerError("Unexpected error: " + ex.Message);
+        }
+        finally
+        {
+            _submitting = false;
+            _buttonText = "Complete Registration";
+            StateHasChanged();
+        }
+    }
+
+    [JSInvokable]
+    public Task ApplyServerValidationErrors(Dictionary<string, string[]> errors)
+    {
+        _messageStore.Clear();
+        foreach (var kv in errors)
+        {
+            if (string.IsNullOrEmpty(kv.Key))
+            {
+                _messageStore.Add(new FieldIdentifier(Model, ""), kv.Value);
+            }
+            else
+            {
+                var field = new FieldIdentifier(Model, kv.Key);
+                _messageStore.Add(field, kv.Value);
+            }
+        }
+
+        _editContext.NotifyValidationStateChanged();
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task OnServerError(string message)
+    {
+        _messageStore.Clear();
+        _messageStore.Add(new FieldIdentifier(Model, ""), message);
+        _editContext.NotifyValidationStateChanged();
+        return Task.CompletedTask;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _dotNetRef?.Dispose();
+        if (_module is not null)
+        {
+            await _module.DisposeAsync();
+        }
+    }
+}

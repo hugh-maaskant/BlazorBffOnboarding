@@ -37,7 +37,149 @@ According to their website:
 - **Separated Diagnostic Endpoints (option):** Includes diagnostic endpoints (`/diag/app`, `/diag/idp`)
   to inspect claims and tokens without interfering with the primary user flow.
 
-## Limitations
+## Interactive Onboarding (JS + Blazor Interop) — new section
+
+This project now includes a second, interactive onboarding experience that keeps the onboarding page inside the Blazor layout and provides a better UX:
+
+What changed (overview)
+- New Blazor page: `Components/Pages/OnboardingInteractive.razor`
+  - Renders in Interactive Server mode and uses an `EditForm`.
+  - Uses an explicit `OnSubmit` lambda so server-side validation and the client POST happen in a single click.
+  - Updates the bound model on every keystroke using an `@oninput` handler (accepts `ChangeEventArgs`) and calls `_editContext.NotifyFieldChanged(...)` so validation sees the latest value immediately.
+  - Maintains a `ValidationMessageStore` so server-side validation errors returned from the server can be injected into the normal Blazor validation UI.
+
+- Scoped JS module (JS isolation): `wwwroot/js/onboarding.interop.js`
+  - Imported with `IJSRuntime.InvokeAsync<IJSObjectReference>("import", "./js/onboarding.interop.js")`.
+  - Workflow:
+    1. Fetch antiforgery request token from `GET /antiforgery/token` (sends credentials).
+    2. Serialize the form to JSON and POST to `POST /onboarding/finish` with header `RequestVerificationToken`.
+    3. If server returns validation errors, the JS calls back into Blazor via a `DotNetObjectReference` method `ApplyServerValidationErrors` with a dictionary of field -> string[].
+    4. On success the JS redirects to the returned `redirectUrl`.
+
+- Server endpoints:
+  - `GET /antiforgery/token` — returns the antiforgery request token (requires an authenticated cookie: in demo it accepted `cookie-idp` and can be configured to accept the app cookie as well).
+  - `POST /onboarding/finish` — JSON endpoint that:
+    - Authenticates using the temporary `cookie-idp` scheme (so the IDP session is preserved).
+    - Explicitly validates antiforgery with `IAntiforgery.ValidateRequestAsync`.
+    - Parses and validates the JSON payload server-side.
+    - On validation errors returns `{ success:false, validation: { "DisplayName": ["..."] } }` (HTTP 400).
+    - On success creates a new app user, transforms claims and calls `PerformSignInAsync` (server-side cookie switch), then returns `{ success:true, redirectUrl }`.
+
+Why this design
+- The cookie switch (creation of the application cookie and removal of the temporary IDP cookie) must happen in an HTTP response so the server can set and remove cookies — this cannot be reliably done from a Blazor server component because the SignalR circuit is not an HTTP response/response writer.
+- By keeping the UI interactive (Blazor + JS), we get:
+  - Immediate client-side validation and responsive UX (no full page reload).
+  - Inline display of server-side validation results mapped into the Blazor `EditForm` via `ValidationMessageStore`.
+  - A secure backend that still performs the final cookie sign-in and server-side validation.
+
+Developer notes — key implementation details
+- `OnboardingInteractive.razor`
+  - Uses `EditForm` with `OnSubmit="@(async (EditContext __ec) => await HandleSubmit())"` to adapt the form callback.
+  - Uses an explicit `OnDisplayNameInput(ChangeEventArgs e)` handler to update `Model.DisplayName` and call `_editContext.NotifyFieldChanged(new FieldIdentifier(Model, nameof(Model.DisplayName)));`.
+  - `HandleSubmit` runs `_editContext.Validate()` and only calls the JS POST when valid. Server-side validation errors are applied via `ApplyServerValidationErrors(Dictionary<string,string[]>)`.
+- `onboarding.interop.js`
+  - Uses `fetch` with `credentials: 'same-origin'` so cookies are sent.
+  - Obtains the antiforgery token from `GET /antiforgery/token` and posts JSON to `/onboarding/finish`.
+  - On validation errors invokes `dotnetRef.invokeMethodAsync('ApplyServerValidationErrors', validation)` so Blazor shows field errors without a reload.
+- Antiforgery
+  - Because the client posts JSON, the server endpoint explicitly calls `antiforgery.ValidateRequestAsync(context)` for CSRF protection.
+  - The token endpoint stores an antiforgery cookie and returns the request token.
+- Circuit handling
+  - Switching cookies can temporarily interrupt a Blazor Server circuit. The JS POST redirects the browser after success so the user lands under the new cookie and a new circuit is established cleanly.
+- Fallback
+  - The original `/onboarding` form POST (classic Form POST) remains in the codebase as a fallback/demonstration of the non-interactive option. You can remove it if you decide to show only the interactive version.
+
+Where to find the relevant files
+- `Components/Pages/OnboardingInteractive.razor` — interactive Blazor page and form.
+- `wwwroot/js/onboarding.interop.js` — JS module (JS isolation) that implements the antiforgery-token fetch and JSON POST.
+- `Program.cs` — new endpoints: `/antiforgery/token` and `/onboarding/finish` and the existing `/onboarding` fallback.
+- `OnboardingInputModel.cs` — model and validation attributes used server-side and for mapping error keys.
+
+When to remove the original (non-interactive) flow
+- If you decide to ship only the interactive version, you can remove:
+  - The classic `/onboarding` POST handler and the `OnboardingForm.razor` page.
+  - Update the OIDC `OnTicketReceived` code path to redirect new users directly to `/onboarding/interactive` (already wired in this demo).
+
+User visible behaviour
+- New user signs in at the IDP.
+- The app routes them to `/onboarding/interactive`.
+- The user types a Display Name (model updated on each keystroke).
+- Clicking Submit validates client-side; if OK, a JSON POST is sent to the server with antiforgery protection.
+- If server validation fails, errors are shown inline and user corrects and resubmits (single click).
+- On success the server performs the cookie switch and returns a redirect URL; the JS navigates there.
+
+## Interactive Onboarding (JS + Blazor Interop) — new section
+
+This project now includes a second, interactive onboarding experience that keeps the onboarding page inside the Blazor layout and provides a better UX:
+
+What changed (overview)
+- New Blazor page: `Components/Pages/OnboardingInteractive.razor`
+  - Renders in Interactive Server mode and uses an `EditForm`.
+  - Uses an explicit `OnSubmit` lambda so server-side validation and the client POST happen in a single click.
+  - Updates the bound model on every keystroke using an `@oninput` handler (accepts `ChangeEventArgs`) and calls `_editContext.NotifyFieldChanged(...)` so validation sees the latest value immediately.
+  - Maintains a `ValidationMessageStore` so server-side validation errors returned from the server can be injected into the normal Blazor validation UI.
+
+- Scoped JS module (JS isolation): `wwwroot/js/onboarding.interop.js`
+  - Imported with `IJSRuntime.InvokeAsync<IJSObjectReference>("import", "./js/onboarding.interop.js")`.
+  - Workflow:
+    1. Fetch antiforgery request token from `GET /antiforgery/token` (sends credentials).
+    2. Serialize the form to JSON and POST to `POST /onboarding/finish` with header `RequestVerificationToken`.
+    3. If server returns validation errors, the JS calls back into Blazor via a `DotNetObjectReference` method `ApplyServerValidationErrors` with a dictionary of field -> string[].
+    4. On success the JS redirects to the returned `redirectUrl`.
+
+- Server endpoints:
+  - `GET /antiforgery/token` — returns the antiforgery request token (requires an authenticated cookie: in demo it accepted `cookie-idp` and can be configured to accept the app cookie as well).
+  - `POST /onboarding/finish` — JSON endpoint that:
+    - Authenticates using the temporary `cookie-idp` scheme (so the IDP session is preserved).
+    - Explicitly validates antiforgery with `IAntiforgery.ValidateRequestAsync`.
+    - Parses and validates the JSON payload server-side.
+    - On validation errors returns `{ success:false, validation: { "DisplayName": ["..."] } }` (HTTP 400).
+    - On success creates a new app user, transforms claims and calls `PerformSignInAsync` (server-side cookie switch), then returns `{ success:true, redirectUrl }`.
+
+Why this design
+- The cookie switch (creation of the application cookie and removal of the temporary IDP cookie) must happen in an HTTP response so the server can set and remove cookies — this cannot be reliably done from a Blazor server component because the SignalR circuit is not an HTTP response/response writer.
+- By keeping the UI interactive (Blazor + JS), we get:
+  - Immediate client-side validation and responsive UX (no full page reload).
+  - Inline display of server-side validation results mapped into the Blazor `EditForm` via `ValidationMessageStore`.
+  - A secure backend that still performs the final cookie sign-in and server-side validation.
+
+Developer notes — key implementation details
+- `OnboardingInteractive.razor`
+  - Uses `EditForm` with `OnSubmit="@(async (EditContext __ec) => await HandleSubmit())"` to adapt the form callback.
+  - Uses an explicit `OnDisplayNameInput(ChangeEventArgs e)` handler to update `Model.DisplayName` and call `_editContext.NotifyFieldChanged(new FieldIdentifier(Model, nameof(Model.DisplayName)));`.
+  - `HandleSubmit` runs `_editContext.Validate()` and only calls the JS POST when valid. Server-side validation errors are applied via `ApplyServerValidationErrors(Dictionary<string,string[]>)`.
+- `onboarding.interop.js`
+  - Uses `fetch` with `credentials: 'same-origin'` so cookies are sent.
+  - Obtains the antiforgery token from `GET /antiforgery/token` and posts JSON to `/onboarding/finish`.
+  - On validation errors invokes `dotnetRef.invokeMethodAsync('ApplyServerValidationErrors', validation)` so Blazor shows field errors without a reload.
+- Antiforgery
+  - Because the client posts JSON, the server endpoint explicitly calls `antiforgery.ValidateRequestAsync(context)` for CSRF protection.
+  - The token endpoint stores an antiforgery cookie and returns the request token.
+- Circuit handling
+  - Switching cookies can temporarily interrupt a Blazor Server circuit. The JS POST redirects the browser after success so the user lands under the new cookie and a new circuit is established cleanly.
+- Fallback
+  - The original `/onboarding` form POST (classic Form POST) remains in the codebase as a fallback/demonstration of the non-interactive option. You can remove it if you decide to show only the interactive version.
+
+Where to find the relevant files
+- `Components/Pages/OnboardingInteractive.razor` — interactive Blazor page and form.
+- `wwwroot/js/onboarding.interop.js` — JS module (JS isolation) that implements the antiforgery-token fetch and JSON POST.
+- `Program.cs` — new endpoints: `/antiforgery/token` and `/onboarding/finish` and the existing `/onboarding` fallback.
+- `OnboardingInputModel.cs` — model and validation attributes used server-side and for mapping error keys.
+
+When to remove the original (non-interactive) flow
+- If you decide to ship only the interactive version, you can remove:
+  - The classic `/onboarding` POST handler and the `OnboardingForm.razor` page.
+  - Update the OIDC `OnTicketReceived` code path to redirect new users directly to `/onboarding/interactive` (already wired in this demo).
+
+User visible behaviour
+- New user signs in at the IDP.
+- The app routes them to `/onboarding/interactive`.
+- The user types a Display Name (model updated on each keystroke).
+- Clicking Submit validates client-side; if OK, a JSON POST is sent to the server with antiforgery protection.
+- If server validation fails, errors are shown inline and user corrects and resubmits (single click).
+- On success the server performs the cookie switch and returns a redirect URL; the JS navigates there.
+
+    ## Interactive Onboarding (JS + Blazor Interop) — new section
 
 - Beyond the authentication of the login flows, only limited additional security measures are implemented (see below).
 - All OIDC flow logic is deliberately inlined in the Host program file for ease of viewing.
@@ -90,28 +232,28 @@ The core of this solution is a two-stage sign-in process orchestrated by two dif
 a series of OIDC event handlers, and a dedicated "/onboarding" endpoint with a Blazor "Onboarding" page and form .
 
 1. **Initial Sign-In (`cookie-idp`):** The OIDC handler is configured with `SignInScheme = "cookie-idp"`. 
-   After a user authenticates at the external IDP, they are signed into this temporary, short-lived cookie scheme.
-   The `cookie-idp` cookie holds the original claims and tokens from the IDP.
+ After a user authenticates at the external IDP, they are signed into this temporary, short-lived cookie scheme.
+ The `cookie-idp` cookie holds the original claims and tokens from the IDP.
 
 2. **The `OnTicketReceived` Decision Point:** This event fires after the `cookie-idp` is created.
-   Here, we perform a lookup in our application's user database.
+ Here, we perform a lookup in our application's user database.
 
-    - **If the user exists (Returning User):** We immediately transform their claims and complete the 
-      sign-in to the main application cookie (`cookie`), clean up the temporary `cookie-idp`, and 
-      redirect to the original destination.
+  - **If the user exists (Returning User):** We immediately transform their claims and complete the 
+    sign-in to the main application cookie (`cookie`), clean up the temporary `cookie-idp`, and 
+    redirect to the original destination.
 
-   - **If the user is new:** We store the original intended `ReturnUrl` in the authentication properties.
-     Based on a feature flag (`EnableAuthDiagnostics`), we then either redirect the user to the `/diag/idp`
-     page (for debugging) or the `/onboarding` page (for the real user flow).
-    
+ - **If the user is new:** We store the original intended `ReturnUrl` in the authentication properties.
+   Based on a feature flag (`EnableAuthDiagnostics`), we then either redirect the user to the `/diag/idp`
+   page (for debugging) or the `/onboarding` page (for the real user flow).
+  
 3.  **The `/onboarding` Endpoint:**
-    - `GET /onboarding`: Renders a Blazor page (`OnboardingForm.razor`) containing an `<EditForm>` for the
-      user to enter their information.
-      This page is protected by the `cookie-idp` authorization policy.
-    - `POST /onboarding`: The form posts to this endpoint.
-      It authenticates the user against the `cookie-idp` scheme, creates a new user record in the database,
-      transforms the claims, and completes the sign-in to the main `cookie`.
-      Finally, it retrieves the original `ReturnUrl` and redirects the user to their intended destination.
+  - `GET /onboarding`: Renders a Blazor page (`OnboardingForm.razor`) containing an `<EditForm>` for the
+    user to enter their information.
+    This page is protected by the `cookie-idp` authorization policy.
+  - `POST /onboarding`: The form posts to this endpoint.
+    It authenticates the user against the `cookie-idp` scheme, creates a new user record in the database,
+    transforms the claims, and completes the sign-in to the main `cookie`.
+    Finally, it retrieves the original `ReturnUrl` and redirects the user to their intended destination.
 
 ## Implementation Details
 
@@ -120,9 +262,9 @@ This project solves several issues that can arise when integrating OIDC provider
 ### 1. Configuration-Driven Provider Setup
 
 - **Problem:** Hardcoding provider details (`Authority`, `ClientId`, `Scope`, etc.) in `Program.cs` makes the
-  application rigid and difficult to test against different environments or providers.
+application rigid and difficult to test against different environments or providers.
 - **Solution:** All provider-specific settings are defined in `appsettings.json` under named sections (`Duende`, `B2C`).
-  A top-level key, `ActiveAuthenticationScheme`, determines which provider configuration is loaded at startup:
+A top-level key, `ActiveAuthenticationScheme`, determines which provider configuration is loaded at startup:
   ```csharp
   builder.Services.AddOptions<OpenIdConnectOptions>("oidc")
       .Bind(builder.Configuration.GetSection($"Authentication:{activeScheme}"));
@@ -139,13 +281,12 @@ This project solves several issues that can arise when integrating OIDC provider
 ### 3. Clean Post-Logout Redirects
 
 - **Problem:** Some OIDC providers, like Azure AD B2C, echo back a `state` parameter on the post-logout redirect.
-  This leaves a messy URL (`/?state=...`) in the address bar of the user's browser.
+This leaves a messy URL (`/?state=...`) in the address bar of the user's browser.
 - **Solution:** We implement a two-step logout flow.
-  In `OnRedirectToIdentityProviderForSignOut` event, we set the `PostLogoutRedirectUri` to the handler's own
-  `SignedOutCallbackPath`.
-  We also set `options.SignedOutRedirectUri = "/";`.
-  This ensures the OIDC handler intercepts the callback, consumes the `state` parameter,
-  and then performs a clean, final redirect to `"/"`.
+In `OnRedirectToIdentityProviderForSignOut` event, we set the `PostLogoutRedirectUri` to the handler's own
+`SignedOutCallbackPath` and set `options.SignedOutRedirectUri = "/";`.
+This ensures the OIDC handler intercepts the callback, consumes the `state` parameter,
+and then performs a clean, final redirect to `"/"`.
 
 ## Security Measures
 
@@ -155,28 +296,28 @@ Some come by default in ASP.NET, some in the Duende BFF, and some are added in t
 ### Cookie Security
 - Authentication cookies use the `__Host-` prefix.
 - The main application cookie (`__Host-blazor-app`) and temporary IDP cookie (`__Host-blazor-idp`) are configured with:
-  - `SameSite = Lax`
-  - `SecurePolicy = Always`
-  - `HttpOnly = true`
-  - `IsEssential = true` (for GDPR compliance)
+- `SameSite = Lax`
+- `SecurePolicy = Always`
+- `HttpOnly = true`
+- `IsEssential = true` (for GDPR compliance)
 - The temporary IDP cookie has a 15-minute expiration
 
 ### Request Protection
 - The Server header is removed from all responses
 - On the onboarding endpoint specifically:
-  - Rate limiting (max 5 requests per 15 minutes per IP address)
-  - Request size validation (1KB limit)
-  - Content-type validation
-  - CSRF protection through antiforgery tokens
-  - Secure redirect validation (only local URLs allowed)
+- Rate limiting(max 5 requests per15 minutes per IP address)
+- Request size validation (1KB limit)
+- Content-type validation
+- CSRF protection through antiforgery tokens
+- Secure redirect validation (only local URLs allowed)
 
 ### Input Validation
 - Server-side validation of the onboarding form.
 - Display name requirements:
-  - Minimum length: 5 characters.
-  - Maximum length: 50 characters.
-  - Required field validation.
-  - Only alphanumeric and limited punctuation characters are allowed.
+- Minimum length: 5 characters.
+- Maximum length: 50 characters.
+- Required field validation.
+- Only alphanumeric and limited punctuation characters are allowed.
 
 ### Security Headers
 - `X-Frame-Options: DENY`
@@ -207,91 +348,27 @@ For production deployments, consider:
 
 2. **Set Secrets (for B2C):** The Duende demo provider works out-of-the-box. For Azure AD B2C, you must provide the necessary parameters in appsetting.json:
 
-    ```json
-    "B2C": {
-      "Authority": "https://XXX.b2clogin.com/XXX.onmicrosoft.com/B2C_1_SignupAndSignin/v2.0",
-      "ClientId": "your client Id",
-      "ClientSecret": null,
-      "Scope": [ "openid", "profile", "offline_access", "your client Id" ]
-    }
-    ```
+  ```json
+  "B2C": {
+    "Authority": "https://XXX.b2clogin.com/XXX.onmicrosoft.com/B2C_1_SignupAndSignin/v2.0",
+    "ClientId": "your client Id",
+    "ClientSecret": null,
+    "Scope": [ "openid", "profile", "offline_access", "your client Id" ]
+  }
+  ```
 
-   Authority is typically something in the form of `"https://XXX.b2clogin.com/XXX.onmicrosoft.com/B2C_1_SignupAndSignin/v2.0"`, where XXX is your tenant name.
-    
-   Note the `ClientSecret` should be set using the .NET User Secrets manager:
-   - From the `BlazorBffOnboarding` project directory, run the following command, replacing `Your_Secret_Value_Here` with your actual client secret from the Azure portal:
-     ```sh
-     > dotnet user-secrets init
-     > dotnet user-secrets set "Authentication:B2C:ClientSecret" "Your_Secret_Value_Here"
-     ```
-   - The hierarchical key `Authentication:B2C:ClientSecret` is essential for the configuration binder to correctly associate the secret with the B2C provider settings.
+ Authority is typically something in the form of `"https://XXX.b2clogin.com/XXX.onmicrosoft.com/B2C_1_SignupAndSignin/v2.0"`, where XXX is your tenant name.
+  
+ Note the `ClientSecret` should be set using the .NET User Secrets manager:
+ - From the `BlazorBffOnboarding` project directory, run the following command, replacing `Your_Secret_Value_Here` with your actual client secret from the Azure portal:
+   ```sh
+   > dotnet user-secrets init
+   > dotnet user-secrets set "Authentication:B2C:ClientSecret" "Your_Secret_Value_Here"
+   ```
+ - The hierarchical key `Authentication:B2C:ClientSecret` is essential for the configuration binder to correctly associate the secret with the B2C provider settings.
 
 3. **Configure the User Database:** This project uses a SQLite database to store user information.
    The connection string is located in `appsettings.json`:
-   ```json
-   "ConnectionStrings": {
-     "UserStore": "Data Source=users.db"
-   }
-   ```
-   The database is managed using Entity Framework Core migrations.
-   To create and apply the initial migration, run the following commands from the `BlazorBffOnboarding` project directory:
-   ```sh
-   > dotnet ef migrations add InitialCreate
-   > dotnet ef database update
-   ```
 
-4. **Add your own Provider** (optional)**:** Add another section with a descriptive key and the required details for your Id Provider.
-
-### Running from the Command Line
-
-This solution contains two startup projects that must be running simultaneously: the Blazor BFF host (`BlazorBffOnboarding) and the backend API (`BlazorBffOnboarding.Api`).
-
-To run the solution from the command line, you will need to open **two separate terminal windows**.
-
-**In Terminal 1 (Run the API):**
-
-```sh
-# Navigate to the API project directory
-> cd BlazorBffOnboarding.Api
-
-# Run the API project
-> dotnet run
-```
-You should see output indicating that the API is listening on `https://localhost:7001`.
-
-**In Terminal 2 (Run the Blazor BFF Host):**
-
-```sh
-# Navigate to the Blazor host project directory
-> cd BlazorBffOnboarding
-
-# Run the Blazor host project
-> dotnet run
-```
-The application will launch.
-Open a browser tab on `https://localhost:7035`. The Blazor application is now running and can make calls to the BFF (the /weather page) and the backend API (the /greeting page).
-
-### Running from an IDE
-
-Most modern IDEs (like Visual Studio, JetBrains Rider, or VS Code) can be configured to launch multiple startup projects. Please consult your IDE's documentation for instructions on how to set up a "Compound" or "Multiple Startup Projects" launch configuration that runs both the `BlazorBffOnboarding` and `BlazorBffOnboarding.Api` projects.
-
-### Using the Diagnostic Endpoints
-
-To aid in debugging and integration, this sample includes diagnostic pages. To enable them, add the following to your `appsettings.Development.json`:
-
-```json
-{
-  "EnableAuthDiagnostics": true
-}
-```
--   **/diag/idp:** When the new user flow is triggered with diagnostics enabled, you will be sent to this page to see 
-    the claims, properties, and tokens associated with the temporary `cookie-idp`.
-    At the bottom of the page is a URL that allows you to continue to the  onboarding form.
--   **/diag/app:** After logging in, navigate to this page to see all claims, properties, and tokens associated with
-    your final application session (`cookie`).
-
-## License and Attribution
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-This project is an extension of a demo project from Duende Software, which is also licensed under the MIT License. The original software can be found at https://github.com/DuendeSoftware/Samples/tree/main/BFF/v3/BlazorAutoRendering.
+The database is managed using Entity Framework Core migrations.
+To create and apply the initial migration, run the following commands from the `BlazorBffOnboarding` project directory:
