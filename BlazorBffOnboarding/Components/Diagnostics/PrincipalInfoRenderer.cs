@@ -17,7 +17,7 @@ public static class PrincipalInfoRenderer
         };
     }
 
-    public static async Task<string> GetAuthenticationInfoAsHtmlAsync(HttpContext context, string scheme)
+    private static async Task<string> GetAuthenticationInfoAsHtmlAsync(HttpContext context, string scheme)
     {
         var sb = new StringBuilder();
 
@@ -71,7 +71,9 @@ public static class PrincipalInfoRenderer
             sb.Append("<ul>");
             foreach (var token in tokens)
             {
-                var valueToShow = token.Value.Length > 80 ? token.Value.Substring(0, 80) + "..." : token.Value;
+                var valueToShow = token.Value.Length > 80 
+                    ? string.Concat(token.Value.AsSpan(0, 80), "...") 
+                    : token.Value;
                 sb.Append($"<li><b>{token.Name}</b>: {valueToShow}</li>");
             }
             sb.Append("</ul>");

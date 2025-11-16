@@ -1,0 +1,140 @@
+﻿@page "/onboarding/interactive"
+@rendermode InteractiveServer
+
+@using Microsoft.AspNetCore.Authorization
+@using BlazorBffOnboarding.Components.FormValidation
+
+@attribute [Authorize(Policy = "cookie-idp")]
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Onboarding</PageTitle>
+
+<h1>Onboarding</h1>
+
+<p>Welcome! Please choose a display name to complete your registration.</p>
+<p>The display name must be between
+    @($"{OnboardingInputModel.MinDisplayNameLength}") 
+    and
+    @($"{OnboardingInputModel.MaxDisplayNameLength}") 
+    characters long.
+</p>
+
+<EditForm EditContext="_editContext" OnSubmit="@(async (EditContext _) => await HandleSubmit())">
+    <SubmitOnlyDataAnnotationsValidator />
+
+    <div class="mb-3">
+        <label for="displayName" class="form-label">Display Name</label>
+        <InputText id="displayName" class="form-control" name="DisplayName" @bind-Value="Model.DisplayName" />
+        <ValidationMessage For="@(() => Model.DisplayName)" />
+    </div>
+
+    <ValidationSummary />
+    
+    <button class="btn btn-primary" type="submit" disabled="@_submitting">
+        @_buttonText
+    </button>
+</EditForm>
+
+@code {
+    private OnboardingInputModel Model { get; set; } = new();
+
+    private EditContext _editContext = null!;
+    private ValidationMessageStore _messageStore = null!;
+    private IJSObjectReference? _module;
+    private DotNetObjectReference<OnboardingInteractive>? _dotNetRef;
+    private bool _submitting;
+    private string _buttonText = "Complete Registration";
+
+    protected override void OnInitialized()
+    {
+        _editContext = new EditContext(Model);
+        _messageStore = new ValidationMessageStore(_editContext);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _module = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./js/onboarding.interop.js");
+            _dotNetRef = DotNetObjectReference.Create(this);
+        }
+    }
+
+    private async Task HandleSubmit()
+    {
+        _messageStore.Clear();
+        _editContext.NotifyValidationStateChanged();
+
+        // Trigger the SubmitOnlyDataAnnotationsValidator
+        var isValid = _editContext.Validate();
+        
+        if (!isValid)
+            return;
+
+        _submitting = true;
+        _buttonText = "Submitting...";
+        StateHasChanged();
+
+        try
+        {
+            // Pass the model object to JavaScript, it will be converted to JSON
+            await _module!.InvokeVoidAsync("submitJson", _dotNetRef, Model);
+        }
+        catch (JSException jsEx)
+        {
+            // Show JS interop errors in UI instead of letting the circuit die
+            await OnServerError("Client-side error: " + jsEx.Message);
+        }
+        catch (Exception ex)
+        {
+            // General guard - surface a friendly message
+            await OnServerError("Unexpected error: " + ex.Message);
+        }
+        finally
+        {
+            _submitting = false;
+            _buttonText = "Complete Registration";
+            StateHasChanged();
+        }
+    }
+
+    [JSInvokable]
+    public Task ApplyServerValidationErrors(Dictionary<string, string[]> errors)
+    {
+        _messageStore.Clear();
+        foreach (var kv in errors)
+        {
+            if (string.IsNullOrEmpty(kv.Key))
+            {
+                _messageStore.Add(new FieldIdentifier(Model, string.Empty), kv.Value);
+            }
+            else
+            {
+                var field = new FieldIdentifier(Model, kv.Key);
+                _messageStore.Add(field, kv.Value);
+            }
+        }
+
+        _editContext.NotifyValidationStateChanged();
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task OnServerError(string message)
+    {
+        _messageStore.Clear();
+        _messageStore.Add(new FieldIdentifier(Model, string.Empty), message);
+        _editContext.NotifyValidationStateChanged();
+        return Task.CompletedTask;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _dotNetRef?.Dispose();
+        if (_module is not null)
+        {
+            await _module.DisposeAsync();
+        }
+    }
+}

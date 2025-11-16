@@ -1,13 +1,13 @@
 ﻿@page "/"
-@using Microsoft.AspNetCore.WebUtilities
-
 @rendermode InteractiveAuto
+
+@using Microsoft.AspNetCore.WebUtilities
 
 @inject NavigationManager NavigationManager
 
 <PageTitle>Home</PageTitle>
 
-<h1>Hello, Blazor BFF!</h1>
+<h1>Hello, Blazor BFF Onboarding!</h1>
 
 @if (_onboardingErrorMessage is not null)
 {
@@ -18,7 +18,23 @@
 
 <AuthorizeView>
     <Authorized>
-      <strong>Hello, @context.User.Identity?.Name</strong>
+        <p>
+            <strong>Hello, @context.User.Identity?.Name</strong>
+        </p>
+        <p>
+        @if (context.User.HasClaim(c => c.Type.Equals("display-name", StringComparison.InvariantCultureIgnoreCase)))
+        {
+            var displayName = context.User.Claims
+                .First(c => c.Type.Equals("display-name", StringComparison.InvariantCultureIgnoreCase)).Value;
+            
+            <span>Your DisplayName is: "@displayName"</span>
+        }
+        else
+        {
+            // This should not happen ...
+            <span>Oops, we could not determine your DisplayName, our apologies ...</span>
+        }
+        </p>
     </Authorized>
     <Authorizing>
       <div>logging in</div>
@@ -34,6 +50,7 @@
     protected override void OnInitialized()
     {
         var uri = NavigationManager.ToAbsoluteUri(NavigationManager.Uri);
+        
         if (QueryHelpers.ParseQuery(uri.Query).TryGetValue("onboardingError", out var error))
         {
             if (error == "true" && QueryHelpers.ParseQuery(uri.Query).TryGetValue("message", out var message))

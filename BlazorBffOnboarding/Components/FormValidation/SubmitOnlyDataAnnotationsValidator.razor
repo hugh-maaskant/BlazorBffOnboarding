@@ -1,0 +1,61 @@
+﻿@using System.ComponentModel.DataAnnotations
+
+@implements IDisposable
+
+@code {
+    [CascadingParameter] private EditContext? CurrentEditContext { get; set; }
+
+    private ValidationMessageStore? _messageStore;
+
+    protected override void OnInitialized()
+    {
+        if (CurrentEditContext == null)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(SubmitOnlyDataAnnotationsValidator)} requires a cascading " +
+                $"parameter of type {nameof(EditContext)}. For example, use inside an EditForm.");
+        }
+
+        _messageStore = new ValidationMessageStore(CurrentEditContext);
+        CurrentEditContext.OnValidationRequested += OnValidationRequested;
+    }
+
+    private void OnValidationRequested(object? sender, ValidationRequestedEventArgs args)
+    {
+        if (CurrentEditContext == null || _messageStore == null)
+            return;
+
+        _messageStore.Clear();
+
+        var model = CurrentEditContext.Model;
+        
+        var validationResults = new List<ValidationResult>();
+        var validationContext = new ValidationContext(model);
+
+        // Run full object validation (DataAnnotations)
+        Validator.TryValidateObject(model, validationContext, validationResults, validateAllProperties: true);
+
+        foreach (var validationResult in validationResults)
+        {
+            var members = validationResult.MemberNames.Any() ? validationResult.MemberNames : [string.Empty];
+            foreach (var member in members)
+            {
+                var fieldIdentifier = string.IsNullOrEmpty(member)
+                    ? new FieldIdentifier(model, string.Empty)
+                    : new FieldIdentifier(model, member);
+
+                _messageStore.Add(fieldIdentifier, validationResult.ErrorMessage!);
+            }
+        }
+
+        CurrentEditContext.NotifyValidationStateChanged();
+    }
+
+    public void Dispose()
+    {
+        if (CurrentEditContext != null)
+        {
+            CurrentEditContext.OnValidationRequested -= OnValidationRequested;
+        }
+    }
+}

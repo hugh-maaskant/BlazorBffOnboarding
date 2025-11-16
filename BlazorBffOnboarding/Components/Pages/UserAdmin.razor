@@ -1,13 +1,12 @@
 @page "/admin/users"
 @rendermode InteractiveServer
-@using BlazorBffOnboarding.AppUser
-@using Microsoft.AspNetCore.Authorization
 
-@inject IAppUserService UserService
-@inject NavigationManager NavigationManager
+@using Microsoft.AspNetCore.Authorization
+@using BlazorBffOnboarding.AppUser
 
 @attribute [Authorize(Policy = "Admin")]
-
+@inject IAppUserService UserService
+@inject NavigationManager NavigationManager
 
 <PageTitle>User Administration</PageTitle>
 
@@ -16,6 +15,10 @@
 @if (_users is null)
 {
     <p><em>Loading...</em></p>
+}
+else if (_users.Count == 0)
+{
+    <p>Sorry, no Users found.</p>
 }
 else
 {
@@ -44,7 +47,8 @@ else
     </table>
 }
 
-@code {
+@code 
+{
     private List<AppUser>? _users;
 
     protected override async Task OnInitializedAsync()

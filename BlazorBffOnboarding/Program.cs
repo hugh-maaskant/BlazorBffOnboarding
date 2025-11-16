@@ -1,8 +1,6 @@
-// Copyright (c) Duende Software. All rights reserved.
+// Copyright (c) 2025 Hugh Maaskant. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
-using System.ComponentModel.DataAnnotations;
-using System.Security.Claims;
 using BlazorBffOnboarding;
 using BlazorBffOnboarding.AppUser;
 using BlazorBffOnboarding.Client;
@@ -11,25 +9,36 @@ using BlazorBffOnboarding.Persistence;
 using Duende.Bff;
 using Duende.Bff.Blazor;
 using Duende.Bff.Yarp;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.ComponentModel.DataAnnotations;
+using System.Security.Claims;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddRazorComponents()
+// Remove the Kestrel Server header from all responses
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.AddServerHeader = false;
+});
+
+// Add Blazor services to the container.
+builder.Services
+    .AddRazorComponents()
     .AddInteractiveServerComponents()
     .AddInteractiveWebAssemblyComponents();
 
 // BFF setup for Blazor
-builder.Services.AddBff()
+builder.Services
+    .AddBff()
     .AddServerSideSessions() // Add in-memory implementation of server side sessions
     .AddBlazorServer()
-    .AddRemoteApis()
-    ;
+    .AddRemoteApis() ;
 
+// Register an HTTP client for the external greeting API that uses the user's access token
 builder.Services.AddUserAccessTokenHttpClient("greet",
     configureClient: client => client.BaseAddress = new Uri("https://localhost:7001/"));
 
@@ -45,14 +54,14 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Get the active authentication scheme from configuration
-var activeScheme = builder.Configuration["ActiveAuthenticationScheme"] ??
-                   throw new InvalidOperationException("ActiveAuthenticationScheme not configured");
+var activeScheme = builder.Configuration["Authentication:ActiveScheme"] ??
+                   throw new InvalidOperationException("Active Authentication Scheme not configured");
 
 // Configure OIDC Provider specific authentication options from the active scheme's configuration section
 builder.Services.AddOptions<OpenIdConnectOptions>("oidc")
-    .Bind(builder.Configuration.GetSection($"Authentication:{activeScheme}"));
+    .Bind(builder.Configuration.GetRequiredSection($"Authentication:{activeScheme}"));
 
-// Configure the authentication
+// Configure Authentication
 builder.Services.AddAuthentication(options =>
     {
         options.DefaultScheme = "cookie";
@@ -70,6 +79,9 @@ builder.Services.AddAuthentication(options =>
         // the temporary cookie for the IDP to sign in the user with the IDP's identity and properties
         options.Cookie.Name = "__Host-blazor-idp";
         options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        options.Cookie.HttpOnly = true;
+        options.Cookie.IsEssential = true;
         options.ExpireTimeSpan = TimeSpan.FromMinutes(15);
     })
     .AddOpenIdConnect("oidc", options =>
@@ -93,99 +105,50 @@ builder.Services.AddAuthentication(options =>
         options.SignOutScheme = "cookie";
         options.SignedOutRedirectUri = "/";
 
-        options.Events.OnTokenValidated = context =>
-        {
-            if (context.Principal?.Identity is not ClaimsIdentity claimsIdentity)
-            {
-                throw new InvalidOperationException("Cannot retrieve ClaimsIdentity from Principal");
-            }
-
-            // Duende BFF needs a Session Id (sid) claim, if the IDP doesn't have one, polyfill our own
-            if (claimsIdentity.FindFirst("sid") == null)
-            {
-                claimsIdentity.AddClaim(new Claim("sid", Guid.CreateVersion7().ToString()));
-            }
-
-            return Task.CompletedTask;
-        };
-
-        options.Events.OnTicketReceived = async context =>
-        {
-            var idpPrincipal = context.Principal ??
-                throw new InvalidOperationException("IDP Principal cannot be Null");
-
-            // Determine the return URL but only allow local URLs, fall back to "/" if not local.
-            var returnUrl = context.ReturnUri;
-            if (string.IsNullOrEmpty(returnUrl) || !returnUrl.StartsWith('/'))
-            {
-                returnUrl = "/";
-            }
-
-            var idpSubject = idpPrincipal.FindFirstValue("sub") ??
-                             throw new InvalidOperationException("'sub' claim not found");
-
-            var appUserService = context.HttpContext.RequestServices.GetRequiredService<IAppUserService>();
-            var appUser = await appUserService.FindUserByExternalIdAsync(activeScheme, idpSubject);
-
-            if (appUser != null)
-            {
-                // User already exists
-                var appUserId = appUser.Id.ToString();
-                var (appPrincipal, appProperties) = TransformPrincipal(idpPrincipal, context.Properties, appUserId);
-
-                // Complete the sign-in process by switching from the idp cookie to the app cookie
-                await PerformSignInAsync(context.HttpContext, appPrincipal, appProperties);
-
-                // Tell the ASP.NET Core middleware we have taken over the Authentication flow
-                context.HandleResponse();
-
-                context.Response.Redirect(returnUrl);
-            }
-            else
-            {
-                // User is new
-                if (context.Properties is not null)
-                {
-                    // preserve the user's sanitized returnUrl to use after onboarding
-                    context.Properties.Items["ultimateReturnUrl"] = returnUrl;
-                }
-
-                // Continue the sign-in process (directly or indirectly via "/diag/idp") with the onboarding UI
-                context.ReturnUri = builder.Configuration.GetValue<bool>("EnableAuthDiagnostics")
-                    ? "/diag/idp"       // Shows Auth info and contains a link to "/onboarding" to proceed
-                    : "/onboarding";    // The onboarding Blazor page with a sample form
-            }
-        };
-
-        options.Events.OnRedirectToIdentityProviderForSignOut = context =>
-        {
-            // Ensure we leave the user with a clean URL in the browser, i.e., without the state parameter
-            context.ProtocolMessage.PostLogoutRedirectUri =
-                new Uri(context.Request.GetBaseUri(), context.Options.SignedOutCallbackPath)
-                .ToString();
-            return Task.CompletedTask;
-        };
+        // Configure the Handlers to be called by the OpenIdConnectHandler during the flows
+        options.Events.OnTokenValidated = HandleOnTokenValidatedEvent;
+        options.Events.OnTicketReceived = HandleOnTicketReceivedEvent;
+        options.Events.OnRedirectToIdentityProviderForSignOut = HandleOnRedirectToIdpForSignOut;
     });
 
-// Make sure the authentication state is available to all components
+// Make sure the authentication state is available to all Blazor components
 builder.Services.AddCascadingAuthenticationState();
 
-builder.Services.AddAuthorization(options =>
-{
-    // To protect the /diag/idp endpoint
-    options.AddPolicy("cookie-idp", policy =>
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("cookie-idp", policy =>
     {
         policy.AddAuthenticationSchemes("cookie-idp");
         policy.RequireAuthenticatedUser();
-    });
-
-    // To protect the /admin/users endpoint
-    options.AddPolicy("Admin", policy =>
+    })
+    .AddPolicy("Admin", policy =>
     {
         policy.RequireAuthenticatedUser();
         // In a real app, you would also require a specific role claim:
         // policy.RequireRole("admin");
     });
+
+// Configure Rate Limiting for the onboarding endpoint and the antiforgery token endpoint
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("onboarding", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(15)
+            }));
+
+    // Lightweight rate-limit for antiforgery token requests.
+    // Only the authenticated temporary IDP session should call this, but add rate limiting as defense-in-depth.
+    options.AddPolicy("antiforgery", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "anon",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,               // e.g. 10 requests
+                Window = TimeSpan.FromMinutes(5)
+            }));
 });
 
 var app = builder.Build();
@@ -213,6 +176,7 @@ app.UseAntiforgery();
 app.MapBffManagementEndpoints();
 
 app.MapStaticAssets();
+
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode()
     .AddInteractiveWebAssemblyRenderMode()
@@ -223,75 +187,200 @@ app.MapRemoteBffApiEndpoint("/remote-apis/greetings", "https://localhost:7001")
 
 app.MapWeatherEndpoints();
 
-// This is where the onboarding form's POST callback is handled
-app.MapPost("/onboarding", async (HttpContext context, [FromForm] OnboardingInputModel model) =>
+// Async antiforgery token endpoint for submitting the OnboardingInputModel from JavaScript.
+// Require cookie-idp and rate limiting
+app.MapGet("/antiforgery/token", async (HttpContext ctx, IAntiforgery antiforgery) =>
 {
-    // Ensure we are authenticated with the IDP
-    var result = await context.AuthenticateAsync("cookie-idp");
+    // Require the temporary IDP cookie session
+    var authResult = await ctx.AuthenticateAsync("cookie-idp");
+    if (!authResult.Succeeded) return Results.Unauthorized();
 
-    if (!result.Succeeded || result.Principal is null || result.Properties is null)
-        return Results.Challenge();
+    var tokens = antiforgery.GetAndStoreTokens(ctx);
+    
+    return Results.Json(new { token = tokens.RequestToken });
+})
+.RequireAuthorization("cookie-idp")
+.RequireRateLimiting("antiforgery");
 
-    // Server-side validation of the incoming model
-    var validationResults = new List<ValidationResult>();
-    var validationContext = new ValidationContext(model);
+// This is where the onboarding form's POST (from JavaScript) callback is handled
+app.MapPost("/onboarding/finish", HandleOnboardingFinishPostRequest)
+.RequireAuthorization("cookie-idp")
+.RequireRateLimiting("onboarding");
 
-    if (!Validator.TryValidateObject(model, validationContext, validationResults, true))
-    {
-        // The user provided invalid data. Initiate a full OIDC sign-out and redirect to the homepage with an error message
-        // Extract and combine the validation error messages
-        var errorMessages = validationResults
-            .Select(r => r.ErrorMessage)
-            .Where(m => m is not null)
-            .ToList();
-        var combinedErrorMessage = string.Join("; ", errorMessages);
-
-        // URL-encode the message
-        var encodedMessage = System.Web.HttpUtility.UrlEncode(combinedErrorMessage);
-
-        // Initiate a full OIDC sign-out and redirect to the home page with errormessage
-        var authProps = new AuthenticationProperties
-        {
-            RedirectUri = $"/?onboardingError=true&message={encodedMessage}"
-        };
-        return Results.SignOut(authProps, authenticationSchemes: ["cookie", "oidc"]);
-    }
-
-    // Obtain the AppUserService
-    var appUserService = context.RequestServices.GetRequiredService<IAppUserService>();
-    var idpSubject = result.Principal.FindFirstValue("sub") ?? 
-                     throw new InvalidOperationException("sub claim not found");
-
-    var newAppUser = await appUserService.CreateAppUserAsync(activeScheme, idpSubject, model.DisplayName!);
-    var newUserId = newAppUser.Id.ToString();
-
-    var (appPrincipal, appProperties) = TransformPrincipal(result.Principal, result.Properties, newUserId);
-
-    // Examples of Claim transformations
-    var identity = (ClaimsIdentity)appPrincipal.Identity!;
-    // Ensure there is a "name" claim, use DisplayName as fallback value if there was none
-    if (!identity.HasClaim(claim => claim.Type.Equals("name", StringComparison.InvariantCultureIgnoreCase)))
-    {
-        identity.AddClaim(new Claim("name", model.DisplayName!));
-    }
-    // Add the new display name as a claim to the appPrincipal
-    identity.AddClaim(new Claim("display-name", model.DisplayName!));
-        
-    appProperties.Items.TryGetValue("ultimateReturnUrl", out var finalReturnUrl);
-    appProperties.Items.Remove("ultimateReturnUrl");
-
-    // Complete the sign-in process by switching from the idp cookie to the app cookie
-    await PerformSignInAsync(context, appPrincipal, appProperties);
-        
-    return Results.LocalRedirect(finalReturnUrl ?? "/");
-}).RequireAuthorization("cookie-idp");
+// Add additional Security Headers to every response
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.TryAdd("X-Frame-Options", "DENY");
+    context.Response.Headers.TryAdd("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.TryAdd("Referrer-Policy", "strict-origin-when-cross-origin");
+    await next();
+});
 
 app.Run();
 
 return;
 
-static (ClaimsPrincipal, AuthenticationProperties) TransformPrincipal(
-    ClaimsPrincipal idpPrincipal, AuthenticationProperties? idpProperties, string newUserId)
+//
+// --- Handlers called during the login and logout flows ---
+//
+
+// Called by the OIDC sign-in handler
+Task HandleOnTokenValidatedEvent(TokenValidatedContext context)
+{
+    if (context.Principal?.Identity is not ClaimsIdentity claimsIdentity)
+    {
+        throw new InvalidOperationException("Cannot retrieve ClaimsIdentity from context");
+    }
+
+    // Duende BFF needs a Session ID (sid) claim, if the IDP doesn't have one, polyfill our own
+    if (claimsIdentity.FindFirst("sid") == null)
+    {
+        claimsIdentity.AddClaim(new Claim("sid", Guid.CreateVersion7().ToString()));
+    }
+
+    return Task.CompletedTask;
+}
+
+// Called by the OIDC sign-in handler
+async Task HandleOnTicketReceivedEvent(TicketReceivedContext context)
+{
+    var idpPrincipal = context.Principal ?? throw new InvalidOperationException("IDP Principal cannot be Null");
+
+    // Only allow local URLs, fall back to "/" if not local
+    var returnUrl = context.ReturnUri ?? string.Empty;
+    if (!UriHelper.IsLocalUrl(returnUrl))
+    {
+        returnUrl = "/";
+    }
+
+    var idpSubject = idpPrincipal.FindFirstValue("sub") ?? throw new InvalidOperationException("'sub' claim not found");
+
+    var appUserService = context.HttpContext.RequestServices.GetRequiredService<IAppUserService>();
+    var appUser = await appUserService.FindUserByExternalIdAsync(activeScheme, idpSubject);
+
+    if (appUser is not null)
+    {
+        // User already exists
+        var appUserId = appUser.Id.ToString();
+        var displayName = appUser.DisplayName;
+        var (appPrincipal, appProperties) = TransformPrincipal(idpPrincipal, context.Properties, appUserId, displayName);
+
+        // Complete the sign-in process by switching from the idp cookie to the app cookie
+        await SwitchSignInSchemeAsync(context.HttpContext, appPrincipal, appProperties);
+
+        // Tell the ASP.NET Core middleware we have taken over the Authentication flow
+        context.HandleResponse();
+
+        context.Response.Redirect(returnUrl);
+    }
+    else
+    {
+        // User is new
+        if (context.Properties is not null)
+        {
+            // preserve the user's sanitized returnUrl to use after onboarding
+            context.Properties.Items["ultimateReturnUrl"] = returnUrl;
+        }
+
+        // Continue the sign-in process (directly or indirectly via "/diag/idp") with the onboarding UI
+        context.ReturnUri = builder.Configuration.GetValue<bool>("EnableAuthDiagnostics")
+            ? "/diag/idp" // Shows Auth info and contains a link to "/onboarding" to proceed
+            : "/onboarding/interactive"; // The onboarding Blazor page with a sample form
+    }
+}
+
+// Called by the endpoint for the JavaScript POST back with the data from the Onboarding form ---
+async Task<IResult> HandleOnboardingFinishPostRequest(HttpContext context, IAntiforgery antiforgery)
+{
+    // Ensure we are authenticated with the IDP
+    var auth = await context.AuthenticateAsync("cookie-idp");
+    if (!auth.Succeeded || auth.Principal is null || auth.Properties is null)
+        return Results.Json(new { success = false, message = "Not authenticated" }, statusCode: 401);
+    
+    // Validate the antiforgery token
+    try
+    {
+        await antiforgery.ValidateRequestAsync(context);
+    }
+    catch (AntiforgeryValidationException)
+    {
+        return Results.Json(new { success = false, message = "Invalid antiforgery token" }, statusCode: 400);
+    }
+
+    // Ensure we do not have any overposting or too much data
+    var contentLength = context.Request.ContentLength ?? 0;
+    if (contentLength > 1024) // 1KB limit, adapt to the Onboarding Input Model max size
+        return Results.BadRequest("Request too large");
+
+    // Ensure we have JSON content
+    var contentType = context.Request.ContentType ?? "";
+    if (!contentType.Contains("application/json", StringComparison.OrdinalIgnoreCase))
+        return Results.Json(new { success = false, message = "Expected application/json" }, statusCode: 400);
+
+    // Read and validate the Onboarding Input Model from the POST data
+    OnboardingInputModel? model;
+    try
+    {
+        model = await context.Request.ReadFromJsonAsync<OnboardingInputModel>();
+    }
+    catch (Exception)
+    {
+        return Results.Json(new { success = false, message = "Malformed JSON" }, statusCode: 400);
+    }
+    if (model is null) 
+        return Results.Json(new { success = false, message = "Missing body" }, statusCode: 400);
+
+    // Always (re-)validate user input on the Server side
+    // Note: this is different from the form validation, we got this via a JavaScript initiated POST request
+    var validationResults = new List<ValidationResult>();
+    var validationContext = new ValidationContext(model);
+    if (!Validator.TryValidateObject(model, validationContext, validationResults, true))
+    {
+        var dict = validationResults
+            .SelectMany(r => (r.MemberNames.Any() ? r.MemberNames : [string.Empty])
+                .Select(m => new { Field = m, Error = r.ErrorMessage ?? string.Empty }))
+            .GroupBy(x => x.Field)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Error).ToArray());
+
+        return Results.Json(new { success = false, validation = dict }, statusCode: 400);
+    }
+
+    // All is well, add the new user to the database and perform sign-in with the app cookie
+    try
+    {
+        var idpSubject = auth.Principal.FindFirstValue("sub") ?? 
+                         throw new InvalidOperationException("sub claim not found");
+        var displayName = model.DisplayName!; // has been validated :-)
+        var appUserService = context.RequestServices.GetRequiredService<IAppUserService>();
+        
+        // As a quick solution, use the activeScheme to identify the IDP, in real life consider a better approach
+        var newAppUser = await appUserService.CreateAppUserAsync(activeScheme, idpSubject, displayName);
+        var newUserId = newAppUser.Id.ToString();
+
+        var (appPrincipal, appProperties) = TransformPrincipal(auth.Principal, auth.Properties, newUserId, displayName);
+        
+        // Get and cleanup the ultimateReturnUrl
+        appProperties.Items.TryGetValue("ultimateReturnUrl", out var ultimateReturnUrl);
+        appProperties.Items.Remove("ultimateReturnUrl");
+    
+        await SwitchSignInSchemeAsync(context, appPrincipal, appProperties);
+
+        return Results.Json(new { success = true, redirectUrl = ultimateReturnUrl ?? "/" });
+    }
+    catch (Exception)
+    {
+        // Add logging here ...
+        return Results.Json(new { success = false, message = "Server error" }, statusCode: 500);
+    }
+}
+
+//
+// --- Helper methods ---
+//
+
+// 
+static (ClaimsPrincipal appPrincipal, AuthenticationProperties appProperties) TransformPrincipal(
+    ClaimsPrincipal idpPrincipal, AuthenticationProperties? idpProperties, string newUserId, string displayName)
 {
     var appClaims = new List<Claim>();
 
@@ -302,22 +391,38 @@ static (ClaimsPrincipal, AuthenticationProperties) TransformPrincipal(
     }
     // Add the Application User ID as the "sub" claim
     appClaims.Add(new Claim("sub", newUserId));
+    appClaims.Add(new Claim("display-name", displayName));
+    // If there was no name Claim, use the displayName as value
+    if (appClaims.FirstOrDefault(c => c.Type == "name") is null)
+    {
+        appClaims.Add(new Claim("name", displayName));
+    }
 
     // Create the new appIdentity and appPrincipal using the transformed claims
     var appIdentity = new ClaimsIdentity(appClaims, "cookie", nameType: "name", roleType: "role");
     var appPrincipal = new ClaimsPrincipal(appIdentity);
 
     // If the original properties are null, create a new empty set. Otherwise, use the original properties to preserve all data.
-    // Here too you could filter and/or add Properties at will, be sure to preserve the tokens though.
+    // Here you could filter and/or add Properties at will, be sure to preserve the tokens though.
     var appProperties = idpProperties ?? new AuthenticationProperties();
 
     return (appPrincipal, appProperties);
 }
 
-// Sign-in to the default (App) cookie ("cookie" scheme) and also
-// sign out of the IDP cookie ("cookie-idp" scheme).
-static async Task PerformSignInAsync(HttpContext context, ClaimsPrincipal appPrincipal, AuthenticationProperties props)
+// Sign-in to the default (App) cookie ("cookie" scheme) and also sign-out of the IDP cookie ("cookie-idp" scheme).
+static async Task SwitchSignInSchemeAsync(
+    HttpContext context, ClaimsPrincipal appPrincipal, AuthenticationProperties appProperties)
 {
-    await context.SignInAsync("cookie", appPrincipal, props);
+    await context.SignInAsync("cookie", appPrincipal, appProperties);
     await context.SignOutAsync("cookie-idp");
+}
+
+// Called by the OIDC sign-out handler
+Task HandleOnRedirectToIdpForSignOut(RedirectContext context)
+{
+    // Ensure we leave the user with a clean URL in the browser, i.e., without the state parameter
+    context.ProtocolMessage.PostLogoutRedirectUri = 
+        new Uri(context.Request.GetBaseUri(), context.Options.SignedOutCallbackPath).ToString();
+    
+    return Task.CompletedTask;
 }

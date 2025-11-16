@@ -11,6 +11,7 @@ public class AppUser
     public Guid Id { get; set; }
 
     [Required]
+    [StringLength(40)]
     // The name of the OIDC Identity Provider (IDP)
     public string IdpName { get; set; } = null!;
 
@@ -19,7 +20,7 @@ public class AppUser
     public string IdpSubject { get; set; } = null!;
 
     [Required]
-    [StringLength(50)]
+    [StringLength(80)]
     // The user's display name as entered in the onboarding form
     public string DisplayName { get; set; } = null!;
 }
